@@ -1,0 +1,15 @@
+# =====================
+# ASP.NET 專案
+# =====================
+/bin/
+/obj/
+/.vs/
+*.user
+*.suo
+*.cache
+*.db
+*.sqlite
+*.sqlite3
+*.dll
+# temp build
+/temp_build/

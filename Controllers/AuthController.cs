@@ -12,6 +12,7 @@ using DemoAPI.DTOs;
 using DemoAPI.Helpers;
 using DemoAPI.Data;
 using DemoAPI.Models;
+using Microsoft.AspNetCore.Identity;
 
 namespace DemoAPI.Controllers
 {
@@ -29,34 +30,51 @@ namespace DemoAPI.Controllers
         }
 
         [HttpPost("register")]
-        public IActionResult Register(User user)
+        public IActionResult Register(RegisterDto user)
         {
             if (_context.Users.Any(u => u.Email == user.Email))
             {
                 return BadRequest("Email already exists");
             }
 
-            _context.Users.Add(user);
+            var hasher = new PasswordHasher<RegisterDto>();
+            user.Password = hasher.HashPassword(user, user.Password);
+
+            var newuser = new User
+            {
+                Email = user.Email,
+                Password = user.Password
+            };
+
+            _context.Users.Add(newuser);
             _context.SaveChanges();
 
-            return Ok(user);
+            return Ok(newuser);
         }
 
         [HttpPost("login")]
-        public IActionResult Login(User loginUser)
+        public IActionResult Login(LoginDto loginUser)
         {
             var user = _context.Users
-                .FirstOrDefault(u => u.Email == loginUser.Email && u.Password == loginUser.Password);
+                .FirstOrDefault(u => u.Email == loginUser.Email);
 
             if (user == null)
             {
                 return Unauthorized("Invalid credentials");
             }
 
+            var hasher = new PasswordHasher<User>();
+            var isMatch = hasher.VerifyHashedPassword(user, user.Password, loginUser.Password);
+            if (isMatch == PasswordVerificationResult.Failed)
+            {
+                return Unauthorized("Invalid credentials");
+            }
+
+
             var claims = new[]
             {
                 new Claim(ClaimTypes.Name, user.Email),
-                new Claim("UserId", user.Id.ToString())
+                new Claim(ClaimTypes.NameIdentifier, user.Id.ToString())
             };
 
             var jwtKey = _config["Jwt:Key"];

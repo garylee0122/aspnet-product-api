@@ -15,7 +15,7 @@ namespace DemoAPI.Services
             _context = context;
         }
 
-        public async Task<PagedResultDto<ProductResponseDto>> GetAll(string? keyword, int page)
+        public async Task<PagedResultDto<ProductResponseDto>> GetAll(string? keyword, int page, int? userId)
         {
             page = page < 1 ? 1 : page;
 
@@ -28,6 +28,7 @@ namespace DemoAPI.Services
 
             var totalCount = await query.CountAsync();
             var items = await query
+                .Where(p => p.UserId == userId)
                 .OrderBy(p => p.Id)
                 .Skip((page - 1) * PageSize)
                 .Take(PageSize)
@@ -36,7 +37,8 @@ namespace DemoAPI.Services
                     Id = p.Id,
                     Name = p.Name,
                     Price = p.Price,
-                    Stock = p.Stock
+                    Stock = p.Stock,
+                    UserId = p.UserId
                 })
                 .ToListAsync();
 
@@ -50,16 +52,17 @@ namespace DemoAPI.Services
             };
         }
 
-        public async Task<ProductResponseDto?> GetById(int id)
+        public async Task<ProductResponseDto?> GetById(int id, int? userId)
         {
             return await _context.Products
-                .Where(p => p.Id == id)
+                .Where(p => p.Id == id && p.UserId == userId)
                 .Select(p => new ProductResponseDto
                 {
                     Id = p.Id,
                     Name = p.Name,
                     Price = p.Price,
-                    Stock = p.Stock
+                    Stock = p.Stock,
+                    UserId = p.UserId
                 })
                 .FirstOrDefaultAsync();
         }
@@ -70,7 +73,8 @@ namespace DemoAPI.Services
             {
                 Name = dto.Name,
                 Price = dto.Price,
-                Stock = dto.Stock
+                Stock = dto.Stock,
+                UserId = dto.UserId ?? 0
             };
 
             _context.Products.Add(product);
@@ -81,13 +85,14 @@ namespace DemoAPI.Services
                 Id = product.Id,
                 Name = product.Name,
                 Price = product.Price,
-                Stock = product.Stock
+                Stock = product.Stock,
+                UserId = product.UserId
             };
         }
 
         public async Task<ProductResponseDto?> Update(int id, UpdateProductDto product)
         {
-            var existing = await _context.Products.FindAsync(id);
+            var existing = await _context.Products.Where(p => p.Id == id && p.UserId == product.UserId).FirstOrDefaultAsync();
 
             if (existing == null) return null;
 
@@ -102,13 +107,14 @@ namespace DemoAPI.Services
                 Id = existing.Id,
                 Name = existing.Name,
                 Price = existing.Price,
-                Stock = existing.Stock
+                Stock = existing.Stock,
+                UserId = existing.UserId
             };
         }
 
-        public async Task<bool> Delete(int id)
+        public async Task<bool> Delete(int id, int? userId)
         {
-            var product = await _context.Products.FindAsync(id);
+            var product = await _context.Products.Where(p => p.Id == id && p.UserId == userId).FirstOrDefaultAsync();
 
             if (product == null) return false;
 

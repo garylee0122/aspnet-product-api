@@ -13,5 +13,8 @@ namespace DemoAPI.DTOs
 
         [Range(0, int.MaxValue)]
         public int Stock { get; set; }
+
+        //新增
+        public int? UserId { get; set; }
     }
 }

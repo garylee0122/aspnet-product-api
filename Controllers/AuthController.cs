@@ -49,7 +49,11 @@ namespace DemoAPI.Controllers
             _context.Users.Add(newuser);
             _context.SaveChanges();
 
-            return Ok(newuser);
+            return Ok(new
+            {
+                message = "User registered successfully",
+                user = new { newuser.Id, newuser.Email }
+            });
         }
 
         [HttpPost("login")]

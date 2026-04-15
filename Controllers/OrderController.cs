@@ -50,6 +50,7 @@ namespace DemoAPI.Controllers
                     orderItems.Add(new OrderItem
                     {
                         ProductId = product.Id,
+                        Product = product, // 🔥 關聯設定
                         Price = product.Price,
                         Quantity = item.Quantity
                     });
@@ -74,6 +75,44 @@ namespace DemoAPI.Controllers
                 await transaction.RollbackAsync();
                 throw;
             }
+        }
+
+        [HttpGet]
+        public async Task<IActionResult> GetMyOrders()
+        {
+            var userId = int.Parse(User.FindFirst(ClaimTypes.NameIdentifier)!.Value);
+
+            var orders = await _context.Orders
+                .Where(o => o.UserId == userId) // 🔥 權限控制
+                .Include(o => o.Items)
+                .ThenInclude(i => i.Product) // 🔥 關聯載入
+                .OrderByDescending(o => o.Id)
+                .ToListAsync();
+
+            return Ok(orders);
+        }
+
+        [HttpGet("{id}")]
+        public async Task<IActionResult> GetOrder(int id)
+        {
+            var userId = int.Parse(User.FindFirst(ClaimTypes.NameIdentifier)!.Value);
+
+            var order = await _context.Orders
+                .Where(o => o.Id == id && o.UserId == userId) // 🔥 雙條件
+                .Include(o => o.Items)
+                .ThenInclude(i => i.Product)
+                .FirstOrDefaultAsync();
+
+            if (order == null)
+            {
+                return NotFound(new
+                {
+                    status = "error",
+                    message = "Order not found"
+                });
+            }
+
+            return Ok(order);
         }
     }
 }

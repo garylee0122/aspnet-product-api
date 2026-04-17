@@ -5,6 +5,7 @@ using DemoAPI.Data;
 using DemoAPI.DTOs;
 using DemoAPI.Models;
 using System.Security.Claims;
+using DemoAPI.Helpers;
 
 namespace DemoAPI.Controllers
 {
@@ -60,6 +61,7 @@ namespace DemoAPI.Controllers
                 {
                     UserId = userId,
                     TotalPrice = totalPrice,
+                    Status = "pending",
                     Items = orderItems
                 };
 
@@ -68,7 +70,10 @@ namespace DemoAPI.Controllers
 
                 await transaction.CommitAsync();
 
-                return Ok(order);
+                return Ok(new ApiResponse<object>
+                {
+                    Data = order
+                });
             }
             catch
             {
@@ -82,14 +87,36 @@ namespace DemoAPI.Controllers
         {
             var userId = int.Parse(User.FindFirst(ClaimTypes.NameIdentifier)!.Value);
 
+            int page = 1;
+            int pageSize = 5;
+
             var orders = await _context.Orders
                 .Where(o => o.UserId == userId) // 🔥 權限控制
                 .Include(o => o.Items)
                 .ThenInclude(i => i.Product) // 🔥 關聯載入
+                .Skip((page - 1) * pageSize) // 🔥 分頁 -> 跳過前面的筆數
+                .Take(pageSize) // 🔥 分頁 -> 取出頁面大小的筆數
                 .OrderByDescending(o => o.Id)
                 .ToListAsync();
 
-            return Ok(orders);
+            var orderDtos = orders.Select(o => new OrderDto
+            {
+                Id = o.Id,
+                TotalPrice = o.TotalPrice,
+                Status = o.Status,
+                Items = o.Items.Select(i => new OrderItemDto
+                {
+                    ProductId = i.ProductId,
+                    ProductName = i.Product?.Name ?? "", // 🔥 取產品名稱
+                    Price = i.Price,
+                    Quantity = i.Quantity
+                }).ToList()
+            }).ToList();
+
+            return Ok(new ApiResponse<object>
+            {
+                Data = orderDtos
+            });
         }
 
         [HttpGet("{id}")]
@@ -112,7 +139,24 @@ namespace DemoAPI.Controllers
                 });
             }
 
-            return Ok(order);
+            var orderDto = new OrderDto
+            {
+                Id = order.Id,
+                TotalPrice = order.TotalPrice,
+                Status = order.Status,
+                Items = order.Items.Select(i => new OrderItemDto
+                {
+                    ProductId = i.ProductId,
+                    ProductName = i.Product?.Name ?? "",
+                    Price = i.Price,
+                    Quantity = i.Quantity
+                }).ToList()
+            };
+
+            return Ok(new ApiResponse<object>
+            {
+                Data = orderDto
+            });
         }
     }
 }

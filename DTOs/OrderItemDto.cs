@@ -3,14 +3,11 @@ using System.ComponentModel.DataAnnotations;
 
 namespace DemoAPI.DTOs
 {
-    public class CreateOrderDto
-    {
-        public List<CreateOrderItemDto> Items { get; set; } = new List<CreateOrderItemDto>();
-    }
-
-    public class CreateOrderItemDto
+    public class OrderItemDto
     {
         public int ProductId { get; set; }
+        public string ProductName { get; set; } = "";
+        public int Price { get; set; }
         public int Quantity { get; set; }
     }
 }

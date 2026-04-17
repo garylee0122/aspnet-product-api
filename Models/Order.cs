@@ -10,6 +10,8 @@ namespace DemoAPI.Models
 
         public int TotalPrice { get; set; }
 
+        public string Status { get; set; } = "pending";
+
         public List<OrderItem> Items { get; set; } = new List<OrderItem>();
     }
 }

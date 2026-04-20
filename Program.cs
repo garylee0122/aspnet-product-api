@@ -5,14 +5,23 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.IdentityModel.Tokens;
 using System.Text;
+using Serilog;
 
 var builder = WebApplication.CreateBuilder(args);
+
+builder.Host.UseSerilog((context, services, configuration) =>
+    configuration
+        .ReadFrom.Configuration(context.Configuration)
+        .ReadFrom.Services(services)
+        .Enrich.FromLogContext());
 
 builder.Services.AddControllers();
 builder.Services.AddScoped<ProductService>();
 
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
+
+builder.Services.AddMemoryCache();
 
 // for global model validation error response
 builder.Services.Configure<ApiBehaviorOptions>(options =>
@@ -51,6 +60,12 @@ builder.Services.AddAuthentication(options =>
     };
 });
 
+// Redis cache
+builder.Services.AddStackExchangeRedisCache(options =>
+{
+    options.Configuration = "localhost:6379";
+});
+
 // sqlite
 //builder.Services.AddDbContext<AppDbContext>(options => options.UseSqlite("Data Source=products.db"));
 
@@ -75,4 +90,16 @@ app.UseAuthorization();
 
 app.MapControllers();
 
-app.Run();
+try
+{
+    Log.Information("Starting DemoAPI");
+    app.Run();
+}
+catch (Exception ex)
+{
+    Log.Fatal(ex, "DemoAPI terminated unexpectedly");
+}
+finally
+{
+    Log.CloseAndFlush();
+}

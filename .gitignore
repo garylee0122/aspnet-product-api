@@ -13,3 +13,7 @@
 *.dll
 # temp build
 /temp_build/
+
+# logs
+/logs/
+*.log

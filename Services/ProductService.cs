@@ -5,6 +5,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Distributed;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging;
+using System.Diagnostics;
 using System.Text.Json;
 
 namespace DemoAPI.Services
@@ -65,6 +66,7 @@ namespace DemoAPI.Services
         public async Task<List<Product>> GetProducts(string keyword, int? userId)
         {
             var cacheKey = $"products_{keyword ?? "all"}_user_{userId?.ToString() ?? "anonymous"}";
+            var stopwatch = Stopwatch.StartNew();
 
             /*
              * 以下是原本使用 Memory Cache 的寫法，完整保留作為對照。
@@ -104,11 +106,13 @@ namespace DemoAPI.Services
             var cachedJson = await _redisCache.GetStringAsync(cacheKey);
             if (!string.IsNullOrEmpty(cachedJson))
             {
+                stopwatch.Stop();
                 _logger.LogInformation(
-                    "Products redis cache hit. CacheKey: {CacheKey}, Keyword: {Keyword}, UserId: {UserId}",
+                    "Products redis cache hit. CacheKey: {CacheKey}, Keyword: {Keyword}, UserId: {UserId}, ElapsedMilliseconds: {ElapsedMilliseconds}",
                     cacheKey,
                     keyword,
-                    userId);
+                    userId,
+                    stopwatch.ElapsedMilliseconds);
 
                 return JsonSerializer.Deserialize<List<Product>>(cachedJson, JsonOptions) ?? new List<Product>();
             }
@@ -132,6 +136,15 @@ namespace DemoAPI.Services
             }
 
             var products = await query.ToListAsync();
+            stopwatch.Stop();
+
+            _logger.LogInformation(
+                "Products loaded from DB. CacheKey: {CacheKey}, Keyword: {Keyword}, UserId: {UserId}, Count: {Count}, ElapsedMilliseconds: {ElapsedMilliseconds}",
+                cacheKey,
+                keyword,
+                userId,
+                products.Count,
+                stopwatch.ElapsedMilliseconds);
 
             var cacheOptions = new DistributedCacheEntryOptions
             {

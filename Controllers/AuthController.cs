@@ -7,7 +7,7 @@ using System.IdentityModel.Tokens.Jwt;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Authorization;
-using DemoAPI.Services;
+using DemoAPI.Infrastructure.Services;
 using DemoAPI.DTOs;
 using DemoAPI.Helpers;
 using DemoAPI.Data;

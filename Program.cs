@@ -1,5 +1,7 @@
 using DemoAPI.Data;
-using DemoAPI.Services;
+using DemoAPI.Infrastructure.Services;
+using DemoAPI.Infrastructure.Workers;
+using DemoAPI.Infrastructure.Queues;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
@@ -22,6 +24,9 @@ builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 
 builder.Services.AddMemoryCache();
+
+builder.Services.AddSingleton<OrderQueue>();
+builder.Services.AddHostedService<OrderWorker>();
 
 // for global model validation error response
 builder.Services.Configure<ApiBehaviorOptions>(options =>

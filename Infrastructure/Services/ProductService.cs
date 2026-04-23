@@ -8,7 +8,7 @@ using Microsoft.Extensions.Logging;
 using System.Diagnostics;
 using System.Text.Json;
 
-namespace DemoAPI.Services
+namespace DemoAPI.Infrastructure.Services
 {
     public class ProductService
     {

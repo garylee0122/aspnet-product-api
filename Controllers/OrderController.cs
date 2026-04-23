@@ -6,6 +6,8 @@ using DemoAPI.DTOs;
 using DemoAPI.Models;
 using System.Security.Claims;
 using DemoAPI.Helpers;
+using DemoAPI.Infrastructure.Queues;
+using Microsoft.Extensions.Logging;
 
 namespace DemoAPI.Controllers
 {
@@ -18,10 +20,16 @@ namespace DemoAPI.Controllers
 
         private readonly IConfiguration _config;
 
-        public OrderController(AppDbContext context, IConfiguration config)
+        private readonly OrderQueue _orderQueue;
+
+        private readonly ILogger<OrderController> _logger;
+
+        public OrderController(AppDbContext context, IConfiguration config, OrderQueue orderQueue, ILogger<OrderController> logger)
         {
             _context = context;
             _config = config;
+            _orderQueue = orderQueue;
+            _logger = logger;
         }
 
         [HttpPost]
@@ -67,11 +75,16 @@ namespace DemoAPI.Controllers
 
                 _context.Orders.Add(order);
                 await _context.SaveChangesAsync();
+                _logger.LogInformation($"Order {order.Id} created.");
+
+                _orderQueue.Enqueue(order.Id);
+                _logger.LogInformation($"Order {order.Id} enqueued for processing.");
 
                 await transaction.CommitAsync();
 
                 return Ok(new ApiResponse<object>
                 {
+                    Message = "Order created (processing...)",
                     Data = order
                 });
             }

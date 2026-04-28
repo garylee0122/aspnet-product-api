@@ -74,7 +74,7 @@ namespace DemoAPI.Controllers
                 return Unauthorized("Invalid credentials");
             }
 
-
+            /* for Generate JWT token START */ 
             var claims = new[]
             {
                 new Claim(ClaimTypes.Name, user.Email),
@@ -99,6 +99,7 @@ namespace DemoAPI.Controllers
                 expires: DateTime.Now.AddHours(1),
                 signingCredentials: creds
             );
+            /* for Generate JWT token END */
 
             return Ok(new
             {

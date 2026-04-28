@@ -1,3 +1,4 @@
+using DemoAPI.Enums;
 using System.ComponentModel.DataAnnotations;
 
 namespace DemoAPI.Models
@@ -10,7 +11,7 @@ namespace DemoAPI.Models
 
         public int TotalPrice { get; set; }
 
-        public string Status { get; set; } = "pending";
+        public OrderStatus Status { get; set; } = OrderStatus.Pending;
 
         public List<OrderItem> Items { get; set; } = new List<OrderItem>();
     }

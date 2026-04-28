@@ -1,19 +1,20 @@
 using System.Collections.Concurrent;
+using DemoAPI.DTOs;
 
 namespace DemoAPI.Infrastructure.Queues
 {
     public class OrderQueue
     {
-        private readonly ConcurrentQueue<int> _queue = new();
+        private readonly ConcurrentQueue<OrderQueueItem> _queue = new();
 
-        public void Enqueue(int orderId)
+        public void Enqueue(OrderQueueItem item)
         {
-            _queue.Enqueue(orderId);
+            _queue.Enqueue(item);
         }
 
-        public bool TryDequeue(out int orderId)
+        public bool TryDequeue(out OrderQueueItem? item)
         {
-            return _queue.TryDequeue(out orderId);
+            return _queue.TryDequeue(out item);
         }
     }
 }

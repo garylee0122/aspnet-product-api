@@ -1,13 +1,9 @@
+using DemoAPI.DTOs;
+using DemoAPI.Helpers;
+using DemoAPI.Infrastructure.Services;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.EntityFrameworkCore;
-using DemoAPI.Data;
-using DemoAPI.DTOs;
-using DemoAPI.Models;
 using System.Security.Claims;
-using DemoAPI.Helpers;
-using DemoAPI.Infrastructure.Queues;
-using Microsoft.Extensions.Logging;
 
 namespace DemoAPI.Controllers
 {
@@ -16,160 +12,90 @@ namespace DemoAPI.Controllers
     [Authorize]
     public class OrderController : ControllerBase
     {
-        private readonly AppDbContext _context;
+        private readonly OrderService _service;
 
-        private readonly IConfiguration _config;
-
-        private readonly OrderQueue _orderQueue;
-
-        private readonly ILogger<OrderController> _logger;
-
-        public OrderController(AppDbContext context, IConfiguration config, OrderQueue orderQueue, ILogger<OrderController> logger)
+        public OrderController(OrderService service)
         {
-            _context = context;
-            _config = config;
-            _orderQueue = orderQueue;
-            _logger = logger;
+            _service = service;
         }
 
         [HttpPost]
         public async Task<IActionResult> Create(CreateOrderDto dto)
         {
-            var userId = int.Parse(User.FindFirst(ClaimTypes.NameIdentifier)!.Value);
-
-            using var transaction = await _context.Database.BeginTransactionAsync();
-
-            try
+            var userId = GetClaimUserId();
+            if (userId == null)
             {
-                int totalPrice = 0;
-                var orderItems = new List<OrderItem>();
+                return Unauthorized();
+            }
 
-                foreach (var item in dto.Items)
+            var result = await _service.Create(dto, userId.Value);
+            if (!result.IsSuccess)
+            {
+                return StatusCode(result.StatusCode, new ApiResponse<string>
                 {
-                    var product = await _context.Products.FindAsync(item.ProductId);
-
-                    if (product == null)
-                    {
-                        return NotFound($"Product {item.ProductId} not found");
-                    }
-
-                    int subtotal = product.Price * item.Quantity;
-                    totalPrice += subtotal;
-
-                    orderItems.Add(new OrderItem
-                    {
-                        ProductId = product.Id,
-                        Product = product, // 🔥 關聯設定
-                        Price = product.Price,
-                        Quantity = item.Quantity
-                    });
-                }
-
-                var order = new Order
-                {
-                    UserId = userId,
-                    TotalPrice = totalPrice,
-                    Status = "pending",
-                    Items = orderItems
-                };
-
-                _context.Orders.Add(order);
-                await _context.SaveChangesAsync();
-                _logger.LogInformation($"Order {order.Id} created.");
-
-                _orderQueue.Enqueue(order.Id);
-                _logger.LogInformation($"Order {order.Id} enqueued for processing.");
-
-                await transaction.CommitAsync();
-
-                return Ok(new ApiResponse<object>
-                {
-                    Message = "Order created (processing...)",
-                    Data = order
+                    Status = "error",
+                    Message = result.ErrorMessage
                 });
             }
-            catch
+
+            return Ok(new ApiResponse<OrderDto>
             {
-                await transaction.RollbackAsync();
-                throw;
-            }
+                Message = "Order created (processing...)",
+                Data = result.Data
+            });
         }
 
         [HttpGet]
         public async Task<IActionResult> GetMyOrders()
         {
-            var userId = int.Parse(User.FindFirst(ClaimTypes.NameIdentifier)!.Value);
-
-            int page = 1;
-            int pageSize = 5;
-
-            var orders = await _context.Orders
-                .Where(o => o.UserId == userId) // 🔥 權限控制
-                .Include(o => o.Items)
-                .ThenInclude(i => i.Product) // 🔥 關聯載入
-                .Skip((page - 1) * pageSize) // 🔥 分頁 -> 跳過前面的筆數
-                .Take(pageSize) // 🔥 分頁 -> 取出頁面大小的筆數
-                .OrderByDescending(o => o.Id)
-                .ToListAsync();
-
-            var orderDtos = orders.Select(o => new OrderDto
+            var userId = GetClaimUserId();
+            if (userId == null)
             {
-                Id = o.Id,
-                TotalPrice = o.TotalPrice,
-                Status = o.Status,
-                Items = o.Items.Select(i => new OrderItemDto
-                {
-                    ProductId = i.ProductId,
-                    ProductName = i.Product?.Name ?? "", // 🔥 取產品名稱
-                    Price = i.Price,
-                    Quantity = i.Quantity
-                }).ToList()
-            }).ToList();
+                return Unauthorized();
+            }
 
-            return Ok(new ApiResponse<object>
+            var orders = await _service.GetMyOrders(userId.Value);
+
+            return Ok(new ApiResponse<List<OrderDto>>
             {
-                Data = orderDtos
+                Data = orders
             });
         }
 
         [HttpGet("{id}")]
         public async Task<IActionResult> GetOrder(int id)
         {
-            var userId = int.Parse(User.FindFirst(ClaimTypes.NameIdentifier)!.Value);
+            var userId = GetClaimUserId();
+            if (userId == null)
+            {
+                return Unauthorized();
+            }
 
-            var order = await _context.Orders
-                .Where(o => o.Id == id && o.UserId == userId) // 🔥 雙條件
-                .Include(o => o.Items)
-                .ThenInclude(i => i.Product)
-                .FirstOrDefaultAsync();
-
+            var order = await _service.GetById(id, userId.Value);
             if (order == null)
             {
-                return NotFound(new
+                return NotFound(new ApiResponse<string>
                 {
-                    status = "error",
-                    message = "Order not found"
+                    Status = "error",
+                    Message = "Order not found"
                 });
             }
 
-            var orderDto = new OrderDto
+            return Ok(new ApiResponse<OrderDto>
             {
-                Id = order.Id,
-                TotalPrice = order.TotalPrice,
-                Status = order.Status,
-                Items = order.Items.Select(i => new OrderItemDto
-                {
-                    ProductId = i.ProductId,
-                    ProductName = i.Product?.Name ?? "",
-                    Price = i.Price,
-                    Quantity = i.Quantity
-                }).ToList()
-            };
-
-            return Ok(new ApiResponse<object>
-            {
-                Data = orderDto
+                Data = order
             });
+        }
+
+        private int? GetClaimUserId()
+        {
+            var userIdClaim = User.Claims.FirstOrDefault(claim => claim.Type == ClaimTypes.NameIdentifier);
+            if (userIdClaim == null)
+            {
+                return null;
+            }
+
+            return int.Parse(userIdClaim.Value ?? "0");
         }
     }
 }

@@ -17,11 +17,13 @@ namespace DemoAPI.Infrastructure.Services
         private readonly AppDbContext _context;
         private readonly OrderQueue _orderQueue;
         private readonly ILogger<OrderService> _logger;
+        private readonly RedisQueueService _redisQueue;
 
-        public OrderService(AppDbContext context, OrderQueue orderQueue, ILogger<OrderService> logger)
+        public OrderService(AppDbContext context, OrderQueue orderQueue, RedisQueueService redisQueue, ILogger<OrderService> logger)
         {
             _context = context;
             _orderQueue = orderQueue;
+            _redisQueue = redisQueue;
             _logger = logger;
         }
 
@@ -123,8 +125,9 @@ namespace DemoAPI.Infrastructure.Services
                 _logger.LogInformation("Order {OrderId} created.", order.Id);
 
                 // 將訂單加入 Queue 以供背景工作者處理
-                _orderQueue.Enqueue(new OrderQueueItem { OrderId = order.Id });
-                _logger.LogInformation("Order {OrderId} enqueued for processing.", order.Id);
+                // _orderQueue.Enqueue(new OrderQueueItem { OrderId = order.Id }); // 使用 memory queue
+                await _redisQueue.EnqueueAsync(new OrderQueueItem { OrderId = order.Id }); // 使用 Redis queue
+                _logger.LogInformation("Order {OrderId} enqueued to Redis queue for processing.", order.Id);
 
                 // 提交交易
                 await transaction.CommitAsync();

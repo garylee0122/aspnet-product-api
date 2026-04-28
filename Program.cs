@@ -8,6 +8,7 @@ using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.IdentityModel.Tokens;
 using System.Text;
 using Serilog;
+using StackExchange.Redis;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -26,7 +27,8 @@ builder.Services.AddSwaggerGen();
 
 builder.Services.AddMemoryCache();
 
-builder.Services.AddSingleton<OrderQueue>();
+builder.Services.AddSingleton<OrderQueue>(); // 使用 memory queue
+builder.Services.AddSingleton<RedisQueueService>(); // 使用 Redis queue
 builder.Services.AddHostedService<OrderWorker>();
 
 // for global model validation error response
@@ -70,6 +72,17 @@ builder.Services.AddAuthentication(options =>
 builder.Services.AddStackExchangeRedisCache(options =>
 {
     options.Configuration = "localhost:6379";
+});
+
+// Redis Queue
+builder.Services.AddSingleton<IConnectionMultiplexer>(sp =>
+{
+    var config = builder.Configuration.GetSection("Redis")["ConnectionString"];
+    if (string.IsNullOrEmpty(config))
+    {
+        throw new InvalidOperationException("Missing Redis:ConnectionString configuration.");
+    }
+    return ConnectionMultiplexer.Connect(config);
 });
 
 // sqlite

@@ -6,6 +6,7 @@ using DemoAPI.Infrastructure.Services;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using StackExchange.Redis;
 using System.Text.Json;
 
 namespace DemoAPI.Infrastructure.Workers
@@ -17,8 +18,17 @@ namespace DemoAPI.Infrastructure.Workers
         private readonly ILogger<OrderWorker> _logger;
         private readonly RedisQueueService _redisQueue;
         private readonly IServiceProvider _serviceProvider;
+        private static readonly JsonSerializerOptions QueueJsonOptions = new()
+        {
+            PropertyNameCaseInsensitive = true
+        };
 
-        public OrderWorker(OrderQueue queue, IServiceScopeFactory scopeFactory, ILogger<OrderWorker> logger, RedisQueueService redisQueue, IServiceProvider serviceProvider)
+        public OrderWorker(
+            OrderQueue queue,
+            IServiceScopeFactory scopeFactory,
+            ILogger<OrderWorker> logger,
+            RedisQueueService redisQueue,
+            IServiceProvider serviceProvider)
         {
             _queue = queue;
             _scopeFactory = scopeFactory;
@@ -32,65 +42,43 @@ namespace DemoAPI.Infrastructure.Workers
             Console.WriteLine("OrderWorker started...");
             _logger.LogInformation("OrderWorker started...");
 
+            try
+            {
+                var initialLength = await _redisQueue.GetLengthAsync();
+                _logger.LogInformation("Redis queue length on startup: {QueueLength}", initialLength);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to read Redis queue length on startup.");
+            }
+
             while (!stoppingToken.IsCancellationRequested)
             {
-                /* 使用 memory queue START */
-                /*
-                if (_queue.TryDequeue(out var queueItem) && queueItem != null)
+                try
                 {
+                    var data = await _redisQueue.DequeueAsync();
+                    if (data == null)
+                    {
+                        await Task.Delay(1000, stoppingToken);
+                        continue;
+                    }
+
+                    OrderQueueItem? queueItem;
                     try
                     {
-                        Console.WriteLine($"Processing order {queueItem.OrderId}");
-                        _logger.LogInformation("Processing order {OrderId}", queueItem.OrderId);
-
-                        if (new Random().Next(2) == 0)
-                        {
-                            throw new Exception("Random failure");
-                        }
-
-                        await Task.Delay(3000, stoppingToken);
-                        await UpdateOrderStatusAsync(queueItem.OrderId, OrderStatus.Created, stoppingToken);
-
-                        Console.WriteLine("Processing order {0} Success!", queueItem.OrderId);
-                        _logger.LogInformation("Processing order {OrderId} Success!", queueItem.OrderId);
+                        queueItem = DeserializeQueueItem(data!);
                     }
-                    catch (Exception ex)
+                    catch (JsonException ex)
                     {
-                        queueItem.RetryCount++;
-
-                        if (queueItem.RetryCount < 3)
-                        {
-                            Console.WriteLine($"Retry {queueItem.RetryCount} for order {queueItem.OrderId}");
-                            _logger.LogError($"Retry {queueItem.RetryCount} for order {queueItem.OrderId}");
-
-                            var delay = (int)Math.Pow(2, queueItem.RetryCount) * 1000;
-                            await Task.Delay(delay, stoppingToken);
-                            _queue.Enqueue(queueItem);
-                        }
-                        else
-                        {
-                            await UpdateOrderStatusAsync(queueItem.OrderId, OrderStatus.Failed, stoppingToken);
-
-                            Console.WriteLine($"Order {queueItem.OrderId} failed permanently");
-                            _logger.LogError($"Order {queueItem.OrderId} failed permanently");
-                        }
-
-                        Console.WriteLine($"Failed to process order {queueItem.OrderId}: {ex.Message}");
-                        _logger.LogError(ex, "Failed to process order {OrderId}", queueItem.OrderId);
+                        _logger.LogError(ex, "Failed to deserialize Redis queue payload: {Payload}", data.ToString());
+                        await Task.Delay(1000, stoppingToken);
+                        continue;
                     }
-                }
-                */
-                /* 使用 memory queue END */
-
-                /* 使用 Redis queue START */
-                var data = await _redisQueue.DequeueAsync();
-                if (data != null)
-                {
-
-                    var queueItem = JsonSerializer.Deserialize<OrderQueueItem>(data);
 
                     if (queueItem == null)
                     {
+                        _logger.LogWarning("Received null queue item from Redis payload: {Payload}", data.ToString());
+                        await Task.Delay(1000, stoppingToken);
                         continue;
                     }
 
@@ -99,7 +87,7 @@ namespace DemoAPI.Infrastructure.Workers
                         Console.WriteLine($"Processing order {queueItem.OrderId} from Redis queue");
                         _logger.LogInformation("Processing order {OrderId} from Redis queue", queueItem.OrderId);
 
-                        if (queueItem.RetryCount < 2) // 模擬前兩次處理失敗
+                        if (queueItem.RetryCount < 2)
                         {
                             throw new Exception("Random failure");
                         }
@@ -117,29 +105,34 @@ namespace DemoAPI.Infrastructure.Workers
                         if (queueItem.RetryCount < 3)
                         {
                             Console.WriteLine($"Retry {queueItem.RetryCount} for order {queueItem.OrderId} from Redis queue");
-                            _logger.LogError($"Retry {queueItem.RetryCount} for order {queueItem.OrderId} from Redis queue");
+                            _logger.LogError("Retry {RetryCount} for order {OrderId} from Redis queue", queueItem.RetryCount, queueItem.OrderId);
 
                             var delay = (int)Math.Pow(2, queueItem.RetryCount) * 1000;
                             await Task.Delay(delay, stoppingToken);
-                            //_queue.Enqueue(queueItem); // 使用 memory queue
-                            await _redisQueue.EnqueueAsync(queueItem); // 使用 Redis queue
+                            await _redisQueue.EnqueueAsync(queueItem);
                         }
                         else
                         {
                             await UpdateOrderStatusAsync(queueItem.OrderId, OrderStatus.Failed, stoppingToken);
 
                             Console.WriteLine($"Order {queueItem.OrderId} failed permanently");
-                            _logger.LogError($"Order {queueItem.OrderId} failed permanently");
+                            _logger.LogError("Order {OrderId} failed permanently", queueItem.OrderId);
                         }
 
                         Console.WriteLine($"Failed to process order {queueItem.OrderId} from Redis queue: {ex.Message}");
                         _logger.LogError(ex, "Failed to process order {OrderId} from Redis queue", queueItem.OrderId);
                     }
                 }
-
-                /* 使用 Redis queue END */
-
-                await Task.Delay(1000, stoppingToken);
+                catch (RedisConnectionException ex)
+                {
+                    _logger.LogError(ex, "Redis connection error in OrderWorker.");
+                    await Task.Delay(3000, stoppingToken);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Unexpected error in OrderWorker loop.");
+                    await Task.Delay(3000, stoppingToken);
+                }
             }
 
             Console.WriteLine("OrderWorker stopped.");
@@ -154,11 +147,68 @@ namespace DemoAPI.Infrastructure.Workers
             var order = await context.Orders.FindAsync(orderId);
             if (order == null)
             {
+                _logger.LogWarning("Order {OrderId} not found when updating status to {Status}", orderId, status);
                 return;
             }
 
             order.Status = status;
             await context.SaveChangesAsync(cancellationToken);
+        }
+
+        private static OrderQueueItem? DeserializeQueueItem(string data)
+        {
+            var queueItem = JsonSerializer.Deserialize<OrderQueueItem>(data, QueueJsonOptions);
+            if (queueItem?.OrderId > 0)
+            {
+                return queueItem;
+            }
+
+            using var document = JsonDocument.Parse(data);
+            var root = document.RootElement;
+
+            if (!TryReadInt(root, "OrderId", out var orderId) &&
+                !TryReadInt(root, "orderId", out orderId) &&
+                !TryReadInt(root, "order_id", out orderId))
+            {
+                return queueItem;
+            }
+
+            TryReadInt(root, "RetryCount", out var retryCount);
+            if (retryCount == 0)
+            {
+                TryReadInt(root, "retryCount", out retryCount);
+            }
+            if (retryCount == 0)
+            {
+                TryReadInt(root, "retry_count", out retryCount);
+            }
+
+            return new OrderQueueItem
+            {
+                OrderId = orderId,
+                RetryCount = retryCount
+            };
+        }
+
+        private static bool TryReadInt(JsonElement root, string propertyName, out int value)
+        {
+            value = 0;
+            if (!root.TryGetProperty(propertyName, out var property))
+            {
+                return false;
+            }
+
+            if (property.ValueKind == JsonValueKind.Number && property.TryGetInt32(out value))
+            {
+                return true;
+            }
+
+            if (property.ValueKind == JsonValueKind.String && int.TryParse(property.GetString(), out value))
+            {
+                return true;
+            }
+
+            return false;
         }
     }
 }

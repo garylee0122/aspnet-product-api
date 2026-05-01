@@ -11,6 +11,12 @@ using Serilog;
 using StackExchange.Redis;
 
 var builder = WebApplication.CreateBuilder(args);
+var redisConnectionString = builder.Configuration.GetSection("Redis")["ConnectionString"];
+
+if (string.IsNullOrWhiteSpace(redisConnectionString))
+{
+    throw new InvalidOperationException("Missing Redis:ConnectionString configuration.");
+}
 
 builder.Host.UseSerilog((context, services, configuration) =>
     configuration
@@ -71,18 +77,16 @@ builder.Services.AddAuthentication(options =>
 // Redis cache
 builder.Services.AddStackExchangeRedisCache(options =>
 {
-    options.Configuration = "localhost:6379";
+    options.Configuration = redisConnectionString;
 });
 
 // Redis Queue
 builder.Services.AddSingleton<IConnectionMultiplexer>(sp =>
 {
-    var config = builder.Configuration.GetSection("Redis")["ConnectionString"];
-    if (string.IsNullOrEmpty(config))
-    {
-        throw new InvalidOperationException("Missing Redis:ConnectionString configuration.");
-    }
-    return ConnectionMultiplexer.Connect(config);
+    var options = ConfigurationOptions.Parse(redisConnectionString);
+    options.AbortOnConnectFail = false;
+    options.ConnectRetry = 3;
+    return ConnectionMultiplexer.Connect(options);
 });
 
 // sqlite
@@ -101,7 +105,8 @@ if (app.Environment.IsDevelopment())
     app.UseSwaggerUI();
 }
 
-app.UseHttpsRedirection();
+// mark for docker, in production we will use nginx to handle https
+//app.UseHttpsRedirection();
 
 app.UseAuthentication();
 

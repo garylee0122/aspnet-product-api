@@ -26,5 +26,10 @@ namespace DemoAPI.Infrastructure.Services
             var result = await _db.ListLeftPopAsync(QueueKey);
             return result;
         }
+
+        public async Task<long> GetLengthAsync()
+        {
+            return await _db.ListLengthAsync(QueueKey);
+        }
     }
 }

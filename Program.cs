@@ -7,11 +7,20 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.IdentityModel.Tokens;
 using System.Text;
+using System.IO;
 using Serilog;
 using StackExchange.Redis;
 
 var builder = WebApplication.CreateBuilder(args);
 var redisConnectionString = builder.Configuration.GetSection("Redis")["ConnectionString"];
+var workerName =
+    Environment.GetEnvironmentVariable("WORKER_NAME")
+    ?? Environment.GetEnvironmentVariable("HOSTNAME")
+    ?? Environment.MachineName;
+var safeWorkerName = string.Join(
+    "_",
+    workerName.Split(Path.GetInvalidFileNameChars(), StringSplitOptions.RemoveEmptyEntries));
+var logOutputTemplate = "[{Timestamp:yyyy-MM-dd HH:mm:ss} {Level:u3}] [{WorkerName}/pid:{ProcessId}] {SourceContext} {Message:lj}{NewLine}{Exception}";
 
 if (string.IsNullOrWhiteSpace(redisConnectionString))
 {
@@ -22,7 +31,15 @@ builder.Host.UseSerilog((context, services, configuration) =>
     configuration
         .ReadFrom.Configuration(context.Configuration)
         .ReadFrom.Services(services)
-        .Enrich.FromLogContext());
+        .WriteTo.Console(outputTemplate: logOutputTemplate)
+        .WriteTo.File(
+            path: Path.Combine("logs", $"{safeWorkerName}-log-.txt"),
+            rollingInterval: RollingInterval.Day,
+            shared: true,
+            outputTemplate: logOutputTemplate)
+        .Enrich.FromLogContext()
+        .Enrich.WithProperty("WorkerName", workerName)
+        .Enrich.WithProperty("ProcessId", Environment.ProcessId));
 
 builder.Services.AddControllers();
 builder.Services.AddScoped<ProductService>();
@@ -35,6 +52,7 @@ builder.Services.AddMemoryCache();
 
 builder.Services.AddSingleton<OrderQueue>(); // 使用 memory queue
 builder.Services.AddSingleton<RedisQueueService>(); // 使用 Redis queue
+builder.Services.AddSingleton<RedisLockService>(); // 使用 Redis lock
 builder.Services.AddHostedService<OrderWorker>();
 
 // for global model validation error response

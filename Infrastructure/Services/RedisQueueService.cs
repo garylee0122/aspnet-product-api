@@ -7,24 +7,34 @@ namespace DemoAPI.Infrastructure.Services
     {
         private readonly IDatabase _db;
         private const string QueueKey = "order_queue";
+        private const string ProcessingQueueKey = "order_queue:processing";
 
         public RedisQueueService(IConnectionMultiplexer redis)
         {
             _db = redis.GetDatabase();
         }
 
-        // 🔥 推入 Queue
         public async Task EnqueueAsync(object data)
         {
             var json = JsonSerializer.Serialize(data);
-            await _db.ListRightPushAsync(QueueKey, json);
+            await _db.ListLeftPushAsync(QueueKey, json);
         }
 
-        // 🔥 取出 Queue（blocking）
-        public async Task<string?> DequeueAsync()
+        public async Task<string?> DequeueForProcessingAsync()
         {
-            var result = await _db.ListLeftPopAsync(QueueKey);
+            var result = await _db.ListRightPopLeftPushAsync(QueueKey, ProcessingQueueKey);
             return result;
+        }
+
+        public async Task CompleteProcessingAsync(string data)
+        {
+            await _db.ListRemoveAsync(ProcessingQueueKey, data, 1);
+        }
+
+        public async Task RequeueProcessingAsync(string data)
+        {
+            await _db.ListRemoveAsync(ProcessingQueueKey, data, 1);
+            await _db.ListLeftPushAsync(QueueKey, data);
         }
 
         public async Task<long> GetLengthAsync()

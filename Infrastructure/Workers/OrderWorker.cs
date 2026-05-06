@@ -18,6 +18,7 @@ namespace DemoAPI.Infrastructure.Workers
         private readonly ILogger<OrderWorker> _logger;
         private readonly RedisQueueService _redisQueue;
         private readonly IServiceProvider _serviceProvider;
+        private readonly RedisLockService _lockService;
         private static readonly JsonSerializerOptions QueueJsonOptions = new()
         {
             PropertyNameCaseInsensitive = true
@@ -28,13 +29,15 @@ namespace DemoAPI.Infrastructure.Workers
             IServiceScopeFactory scopeFactory,
             ILogger<OrderWorker> logger,
             RedisQueueService redisQueue,
-            IServiceProvider serviceProvider)
+            IServiceProvider serviceProvider,
+            RedisLockService lockService)
         {
             _queue = queue;
             _scopeFactory = scopeFactory;
             _logger = logger;
             _redisQueue = redisQueue;
             _serviceProvider = serviceProvider;
+            _lockService = lockService;
         }
 
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -45,18 +48,19 @@ namespace DemoAPI.Infrastructure.Workers
             try
             {
                 var initialLength = await _redisQueue.GetLengthAsync();
-                _logger.LogInformation("Redis queue length on startup: {QueueLength}", initialLength);
+                _logger.LogInformation("Redis order_queue length on startup: {QueueLength}", initialLength);
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Failed to read Redis queue length on startup.");
+                _logger.LogError(ex, "Failed to read Redis order_queue length on startup.");
             }
 
             while (!stoppingToken.IsCancellationRequested)
             {
                 try
                 {
-                    var data = await _redisQueue.DequeueAsync();
+                    // 從 order_queue 中取出一筆資料並移到 order_queue:processing 隊列
+                    var data = await _redisQueue.DequeueForProcessingAsync();
                     if (data == null)
                     {
                         await Task.Delay(1000, stoppingToken);
@@ -66,11 +70,14 @@ namespace DemoAPI.Infrastructure.Workers
                     OrderQueueItem? queueItem;
                     try
                     {
+                        // 嘗試使用嚴格模式反序列化，確保資料格式正確
                         queueItem = DeserializeQueueItem(data!);
                     }
                     catch (JsonException ex)
                     {
-                        _logger.LogError(ex, "Failed to deserialize Redis queue payload: {Payload}", data.ToString());
+                        _logger.LogError(ex, "Failed to deserialize Redis order_queue payload: {Payload}", data.ToString());
+                        // 反序列化成 OrderQueueItem 物件時發生Exception，所以從 order_queue:processing 隊列中移除
+                        await _redisQueue.CompleteProcessingAsync(data);
                         await Task.Delay(1000, stoppingToken);
                         continue;
                     }
@@ -78,7 +85,22 @@ namespace DemoAPI.Infrastructure.Workers
                     if (queueItem == null)
                     {
                         _logger.LogWarning("Received null queue item from Redis payload: {Payload}", data.ToString());
+                        // 因為資料格式錯誤，沒有取得可以反序列化成 OrderQueueItem 物件的JSON，從 order_queue:processing 隊列中移除
+                        await _redisQueue.CompleteProcessingAsync(data);
                         await Task.Delay(1000, stoppingToken);
+                        continue;
+                    }
+
+                    int orderId = queueItem.OrderId;
+                    var lockKey = $"lock:order:{orderId}";
+                    var lockToken = await _lockService.AcquireLockAsync(lockKey);
+                    if (lockToken == null) // 無法取得 lockKey 的鎖，表示有其他工作者正在處理這筆訂單
+                    {
+                        Console.WriteLine("Order {0} is already being processed, returning job to queue...", orderId);
+                        _logger.LogWarning("Order {OrderId} is already being processed, returning job to queue...", orderId);
+                        // 將資料從 order_queue:processing 隊列刪除，並重新放回 order_queue 並稍後重試
+                        await _redisQueue.RequeueProcessingAsync(data);
+                        await Task.Delay(500, stoppingToken);
                         continue;
                     }
 
@@ -87,13 +109,16 @@ namespace DemoAPI.Infrastructure.Workers
                         Console.WriteLine($"Processing order {queueItem.OrderId} from Redis queue");
                         _logger.LogInformation("Processing order {OrderId} from Redis queue", queueItem.OrderId);
 
-                        if (queueItem.RetryCount < 2)
-                        {
-                            throw new Exception("Random failure");
-                        }
+                        // 模擬處理訂單的工作，並且在 retry count 小於 2 的情況下隨機失敗以測試重試機制
+                        //if (queueItem.RetryCount < 2)
+                        //{
+                        //    throw new Exception("Random failure");
+                        //}
 
                         await Task.Delay(3000, stoppingToken);
                         await UpdateOrderStatusAsync(queueItem.OrderId, OrderStatus.Created, stoppingToken);
+                        // 訂單狀態已更新完成，所以從 order_queue:processing 隊列中移除
+                        await _redisQueue.CompleteProcessingAsync(data);
 
                         Console.WriteLine("Processing order {0} Success from Redis queue!", queueItem.OrderId);
                         _logger.LogInformation("Processing order {OrderId} Success from Redis queue!", queueItem.OrderId);
@@ -108,12 +133,18 @@ namespace DemoAPI.Infrastructure.Workers
                             _logger.LogError("Retry {RetryCount} for order {OrderId} from Redis queue", queueItem.RetryCount, queueItem.OrderId);
 
                             var delay = (int)Math.Pow(2, queueItem.RetryCount) * 1000;
+                            // 訂單處理時發生 Exception，所以從 order_queue:processing 隊列中移除
+                            await _redisQueue.CompleteProcessingAsync(data);
                             await Task.Delay(delay, stoppingToken);
+                            // 因為可以 retry 三次，所以在重新塞入 order_queue 中
                             await _redisQueue.EnqueueAsync(queueItem);
                         }
                         else
                         {
                             await UpdateOrderStatusAsync(queueItem.OrderId, OrderStatus.Failed, stoppingToken);
+                            // 訂單處理時發生 Exception，所以從 order_queue:processing 隊列中移除
+                            // 因為 retry 次數已經達到3次，所以不再重新塞回 order_queue 中
+                            await _redisQueue.CompleteProcessingAsync(data);
 
                             Console.WriteLine($"Order {queueItem.OrderId} failed permanently");
                             _logger.LogError("Order {OrderId} failed permanently", queueItem.OrderId);
@@ -121,6 +152,18 @@ namespace DemoAPI.Infrastructure.Workers
 
                         Console.WriteLine($"Failed to process order {queueItem.OrderId} from Redis queue: {ex.Message}");
                         _logger.LogError(ex, "Failed to process order {OrderId} from Redis queue", queueItem.OrderId);
+                    }
+                    finally
+                    {
+                        // 最後釋放 lockKey 的鎖
+                        var released = await _lockService.ReleaseLockAsync(lockKey, lockToken);
+                        if (!released)
+                        {
+                            _logger.LogWarning("Lock for order {OrderId} was not released because ownership changed or it already expired.", orderId);
+                        }
+
+                        Console.WriteLine("Lock for order {0} was released", orderId);
+                        _logger.LogInformation("Lock for order {OrderId} was released", orderId);
                     }
                 }
                 catch (RedisConnectionException ex)

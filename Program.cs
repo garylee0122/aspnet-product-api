@@ -12,7 +12,13 @@ using Serilog;
 using StackExchange.Redis;
 
 var builder = WebApplication.CreateBuilder(args);
-var redisConnectionString = builder.Configuration.GetSection("Redis")["ConnectionString"];
+var redisConfig = builder.Configuration.GetSection("Redis");
+var redisConnectionString = builder.Environment.IsDevelopment()
+    ? redisConfig["ConnectionStringByLocalhost"] ?? redisConfig["ConnectionString"]
+    : redisConfig["ConnectionString"];
+var enableOrderWorkerValue = builder.Configuration["EnableOrderWorker"]
+    ?? Environment.GetEnvironmentVariable("ENABLE_ORDER_WORKER");
+var enableOrderWorker = !string.Equals(enableOrderWorkerValue, "false", StringComparison.OrdinalIgnoreCase);
 var workerName =
     Environment.GetEnvironmentVariable("WORKER_NAME")
     ?? Environment.GetEnvironmentVariable("HOSTNAME")
@@ -41,9 +47,10 @@ builder.Host.UseSerilog((context, services, configuration) =>
         .Enrich.WithProperty("WorkerName", workerName)
         .Enrich.WithProperty("ProcessId", Environment.ProcessId));
 
-builder.Services.AddControllers();
+builder.Services.AddControllersWithViews();
 builder.Services.AddScoped<ProductService>();
 builder.Services.AddScoped<OrderService>();
+builder.Services.AddSingleton<CacheInvalidationService>();
 
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
@@ -53,7 +60,11 @@ builder.Services.AddMemoryCache();
 builder.Services.AddSingleton<OrderQueue>(); // 使用 memory queue
 builder.Services.AddSingleton<RedisQueueService>(); // 使用 Redis queue
 builder.Services.AddSingleton<RedisLockService>(); // 使用 Redis lock
-builder.Services.AddHostedService<OrderWorker>();
+// builder.Services.AddHostedService<OrderWorker>(); // 保留原本一律啟用 Worker 的寫法
+if (enableOrderWorker)
+{
+    builder.Services.AddHostedService<OrderWorker>();
+}
 
 // for global model validation error response
 builder.Services.Configure<ApiBehaviorOptions>(options =>
@@ -130,11 +141,15 @@ app.UseAuthentication();
 
 app.UseAuthorization();
 
+app.MapControllerRoute(
+    name: "default",
+    pattern: "{controller=Home}/{action=Index}/{id?}");
 app.MapControllers();
 
 try
 {
     Log.Information("Starting DemoAPI");
+    Log.Information("Order worker enabled: {EnableOrderWorker}", enableOrderWorker);
     app.Run();
 }
 catch (Exception ex)

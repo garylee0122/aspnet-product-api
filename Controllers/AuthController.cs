@@ -42,6 +42,7 @@ namespace DemoAPI.Controllers
 
             var newuser = new User
             {
+                Name = user.Name,
                 Email = user.Email,
                 Password = user.Password
             };
@@ -52,7 +53,7 @@ namespace DemoAPI.Controllers
             return Ok(new
             {
                 message = "User registered successfully",
-                user = new { newuser.Id, newuser.Email }
+                user = new { newuser.Id, newuser.Name, newuser.Email }
             });
         }
 

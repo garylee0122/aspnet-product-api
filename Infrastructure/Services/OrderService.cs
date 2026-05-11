@@ -5,7 +5,9 @@ using DemoAPI.Infrastructure.Queues;
 using DemoAPI.Models;
 using Microsoft.AspNetCore.Http;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Caching.Distributed;
 using Microsoft.Extensions.Logging;
+using System.Text.Json;
 
 namespace DemoAPI.Infrastructure.Services
 {
@@ -13,17 +15,32 @@ namespace DemoAPI.Infrastructure.Services
     {
         private const int DefaultPage = 1;
         private const int PageSize = 5;
+        private const int OrderCacheTtlSeconds = 300;
+        private static readonly JsonSerializerOptions JsonOptions = new()
+        {
+            PropertyNameCaseInsensitive = true
+        };
 
         private readonly AppDbContext _context;
         private readonly OrderQueue _orderQueue;
         private readonly ILogger<OrderService> _logger;
         private readonly RedisQueueService _redisQueue;
+        private readonly IDistributedCache _redisCache;
+        private readonly CacheInvalidationService _cacheInvalidationService;
 
-        public OrderService(AppDbContext context, OrderQueue orderQueue, RedisQueueService redisQueue, ILogger<OrderService> logger)
+        public OrderService(
+            AppDbContext context,
+            OrderQueue orderQueue,
+            RedisQueueService redisQueue,
+            IDistributedCache redisCache,
+            CacheInvalidationService cacheInvalidationService,
+            ILogger<OrderService> logger)
         {
             _context = context;
             _orderQueue = orderQueue;
             _redisQueue = redisQueue;
+            _redisCache = redisCache;
+            _cacheInvalidationService = cacheInvalidationService;
             _logger = logger;
         }
 
@@ -33,31 +50,26 @@ namespace DemoAPI.Infrastructure.Services
 
             try
             {
-                // 檢查訂單內容是否有 item，且數量是否有效
                 if (dto.Items == null || dto.Items.Count == 0)
                 {
                     return CreateOrderResult.InvalidOrder("Order must contain at least one item");
                 }
 
-                // 檢查是否有商品數量小於等於 0 的 item，若有則回傳錯誤
                 var invalidItem = dto.Items.FirstOrDefault(item => item.Quantity <= 0);
                 if (invalidItem != null)
                 {
                     return CreateOrderResult.InvalidOrder($"Product {invalidItem.ProductId} has invalid quantity");
                 }
 
-                // 從資料庫查詢所有相關的商品 ID
                 var productIds = dto.Items
                     .Select(item => item.ProductId)
                     .Distinct()
                     .ToList();
 
-                // 將商品 ID 與商品資料建立對照字典 (不存在的商品 ID 將不會出現在字典中)
                 var products = await _context.Products
                     .Where(product => productIds.Contains(product.Id))
                     .ToDictionaryAsync(product => product.Id);
 
-                // 檢查是否有任何商品 ID 在資料庫中找不到對應的商品，若有則回傳錯誤
                 var missingProductId = productIds
                     .Cast<int?>()
                     .FirstOrDefault(productId => !products.ContainsKey(productId!.Value));
@@ -67,12 +79,10 @@ namespace DemoAPI.Infrastructure.Services
                     return CreateOrderResult.ProductNotFound(missingProductId.Value);
                 }
 
-                // 組出訂單中各項商品所需的總數量
                 var requestedQuantities = dto.Items
                     .GroupBy(item => item.ProductId)
                     .ToDictionary(group => group.Key, group => group.Sum(item => item.Quantity));
 
-                // 檢查是否有任何商品的庫存不足以滿足訂單需求，若有則回傳錯誤
                 var insufficientStockProduct = requestedQuantities
                     .Select(entry => new
                     {
@@ -90,13 +100,11 @@ namespace DemoAPI.Infrastructure.Services
                         insufficientStockProduct.RequestedQuantity);
                 }
 
-                // 扣除庫存
                 foreach (var requestedQuantity in requestedQuantities)
                 {
                     products[requestedQuantity.Key].Stock -= requestedQuantity.Value;
                 }
 
-                // 建立訂單與訂單項目
                 var orderItems = dto.Items
                     .Select(item =>
                     {
@@ -119,24 +127,26 @@ namespace DemoAPI.Infrastructure.Services
                     Items = orderItems
                 };
 
-                // 儲存訂單與更新庫存
                 _context.Orders.Add(order);
                 await _context.SaveChangesAsync();
                 _logger.LogInformation("Order {OrderId} created.", order.Id);
 
-                // 將訂單加入 Queue 以供背景工作者處理
-                // _orderQueue.Enqueue(new OrderQueueItem { OrderId = order.Id }); // 使用 memory queue
-                await _redisQueue.EnqueueAsync(new OrderQueueItem { OrderId = order.Id }); // 使用 Redis queue
+                // 商品庫存變動後，清除商品相關快取。
+                await _cacheInvalidationService.InvalidateAllProductCacheAsync();
+
+                // 訂單資料有新增時，清除該使用者的訂單列表與單筆訂單快取。
+                await _cacheInvalidationService.InvalidateUserOrderCacheAsync(userId);
+
+                // _orderQueue.Enqueue(new OrderQueueItem { OrderId = order.Id }); // 保留原本的 memory queue 寫法
+                await _redisQueue.EnqueueAsync(new OrderQueueItem { OrderId = order.Id });
                 _logger.LogInformation("Order {OrderId} enqueued to Redis queue for processing.", order.Id);
 
-                // 提交交易
                 await transaction.CommitAsync();
 
                 return CreateOrderResult.Success(MapToOrderDto(order));
             }
             catch
             {
-                // 發生任何錯誤都回滾交易，確保資料一致性
                 await transaction.RollbackAsync();
                 throw;
             }
@@ -145,7 +155,16 @@ namespace DemoAPI.Infrastructure.Services
         public async Task<List<OrderDto>> GetMyOrders(int userId, int page = DefaultPage)
         {
             page = page < 1 ? DefaultPage : page;
+            var cacheKey = GetUserOrdersCacheKey(userId, page);
+            var cachedJson = await _redisCache.GetStringAsync(cacheKey);
 
+            if (!string.IsNullOrEmpty(cachedJson))
+            {
+                _logger.LogInformation("Orders redis cache hit. CacheKey: {CacheKey}, UserId: {UserId}", cacheKey, userId);
+                return JsonSerializer.Deserialize<List<OrderDto>>(cachedJson, JsonOptions) ?? new List<OrderDto>();
+            }
+
+            /*
             var orders = await _context.Orders
                 .Where(order => order.UserId == userId)
                 .Include(order => order.Items)
@@ -156,10 +175,40 @@ namespace DemoAPI.Infrastructure.Services
                 .ToListAsync();
 
             return orders.Select(MapToOrderDto).ToList();
+            */
+
+            var orders = await _context.Orders
+                .Where(order => order.UserId == userId)
+                .Include(order => order.Items)
+                .ThenInclude(item => item.Product)
+                .OrderByDescending(order => order.Id)
+                .Skip((page - 1) * PageSize)
+                .Take(PageSize)
+                .ToListAsync();
+
+            var orderDtos = orders.Select(MapToOrderDto).ToList();
+            await SetOrderCacheAsync(cacheKey, orderDtos);
+
+            return orderDtos;
         }
 
         public async Task<OrderDto?> GetById(int id, int userId)
         {
+            var cacheKey = GetUserOrderCacheKey(userId, id);
+            var cachedJson = await _redisCache.GetStringAsync(cacheKey);
+
+            if (!string.IsNullOrEmpty(cachedJson))
+            {
+                _logger.LogInformation(
+                    "Order redis cache hit. CacheKey: {CacheKey}, UserId: {UserId}, OrderId: {OrderId}",
+                    cacheKey,
+                    userId,
+                    id);
+
+                return JsonSerializer.Deserialize<OrderDto>(cachedJson, JsonOptions);
+            }
+
+            /*
             var order = await _context.Orders
                 .Where(order => order.Id == id && order.UserId == userId)
                 .Include(order => order.Items)
@@ -167,6 +216,45 @@ namespace DemoAPI.Infrastructure.Services
                 .FirstOrDefaultAsync();
 
             return order == null ? null : MapToOrderDto(order);
+            */
+
+            var order = await _context.Orders
+                .Where(order => order.Id == id && order.UserId == userId)
+                .Include(order => order.Items)
+                .ThenInclude(item => item.Product)
+                .FirstOrDefaultAsync();
+
+            if (order == null)
+            {
+                return null;
+            }
+
+            var orderDto = MapToOrderDto(order);
+            await SetOrderCacheAsync(cacheKey, orderDto);
+
+            return orderDto;
+        }
+
+        private async Task SetOrderCacheAsync<T>(string cacheKey, T value)
+        {
+            var json = JsonSerializer.Serialize(value, JsonOptions);
+            var cacheOptions = new DistributedCacheEntryOptions
+            {
+                AbsoluteExpirationRelativeToNow = TimeSpan.FromSeconds(OrderCacheTtlSeconds)
+            };
+
+            await _redisCache.SetStringAsync(cacheKey, json, cacheOptions);
+            await _cacheInvalidationService.TrackOrderCacheKeyAsync(cacheKey);
+        }
+
+        private static string GetUserOrdersCacheKey(int userId, int page)
+        {
+            return $"user:{userId}:orders:page:{page}";
+        }
+
+        private static string GetUserOrderCacheKey(int userId, int orderId)
+        {
+            return $"user:{userId}:order:{orderId}";
         }
 
         private static OrderDto MapToOrderDto(Order order)
